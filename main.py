@@ -1,6 +1,5 @@
 import sqlite3
 import asyncio
-import numpy as np
 from datetime import datetime
 from typing import Optional
 
@@ -11,8 +10,6 @@ from pydantic import BaseModel
 from models.database import Database
 from models.user import User
 from models.group import Group
-from services.whisper_service import WhisperService
-from services.profanity_service import ProfanityService
 from utils.helpers import safe_json_convert
 
 # FastAPI 앱 생성
@@ -149,13 +146,6 @@ app.add_middleware(
 
 # 전역 변수
 db = Database()
-whisper_service = WhisperService()
-profanity_service = ProfanityService()
-
-# 오디오 버퍼 설정
-audio_buffer = []
-buffer_size = 24000  # 1.5초 버퍼
-max_buffer_length = 48000  # 최대 3초
 
 # Pydantic 모델들
 class UserRegister(BaseModel):
@@ -166,8 +156,6 @@ class UserLogin(BaseModel):
     username: str
     password: str
 
-class SensitivityRequest(BaseModel):
-    sensitivity: int
 
 class GroupCreate(BaseModel):
     name: str
@@ -180,6 +168,9 @@ class GroupJoin(BaseModel):
 class BannedWordAdd(BaseModel):
     group_id: int
     word: str
+
+class ProfanityDetect(BaseModel):
+    text: str
 
 # 인증 관련 엔드포인트
 @app.post("/auth/register", 
@@ -251,282 +242,77 @@ def verify_user(user_id: str) -> bool:
 async def root():
     return {"message": "실시간 욕설 감지 서버 (모듈화 버전)", "status": "running", "version": "2.0.0"}
 
-# WebSocket 엔드포인트
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """
-    ## 🎤 실시간 음성 욕설 감지 WebSocket
-    
-    **실시간으로 음성을 분석하여 욕설을 감지하는 WebSocket 연결입니다.**
-    
-    ### 📡 연결 방법
-    ```javascript
-    const ws = new WebSocket('ws://localhost:8000/ws?user_id={your_user_id}');
-    ```
-    
-    ### 🔐 인증
-    - URL 파라미터로 `user_id` 전달 필수
-    - 유효하지 않은 `user_id`인 경우 연결이 자동으로 끊어집니다
-    
-    ### 📤 클라이언트 → 서버 (음성 데이터 전송)
-    **데이터 형식**: 바이너리 (Int16Array)
-    ```javascript
-    // 마이크에서 캡처한 오디오를 Int16 형식으로 변환하여 전송
-    const int16Buffer = new Int16Array(audioData.length);
-    for (let i = 0; i < audioData.length; i++) {
-        int16Buffer[i] = audioData[i] * 32768;
-    }
-    ws.send(int16Buffer.buffer);
-    ```
-    
-    ### 📥 서버 → 클라이언트 (감지 결과)
-    **응답 형식**: JSON
-    
-    **욕설 감지된 경우:**
-    ```json
-    {
-        "detected": true,
-        "text": "인식된 음성 텍스트",
-        "pattern": "감지된 욕설 패턴",
-        "patterns": ["패턴1", "패턴2"],
-        "confidence": 0.85,
-        "energy": 0.042,
-        "timestamp": "2024-01-01T12:00:00"
-    }
-    ```
-    
-    **정상 음성인 경우:**
-    ```json
-    {
-        "detected": false,
-        "text": "인식된 정상 음성",
-        "energy": 0.035,
-        "timestamp": "2024-01-01T12:00:00"
-    }
-    ```
-    
-    **음성 활동 없음:**
-    ```json
-    {
-        "detected": false,
-        "text": "",
-        "energy": 0.001,
-        "message": "음성 활동 없음"
-    }
-    ```
-    
-    ### ⚙️ 오디오 설정 권장사항
-    ```javascript
-    const constraints = {
-        audio: {
-            sampleRate: 16000,      // 16kHz 샘플링
-            channelCount: 1,        // 모노 채널
-            echoCancellation: true, // 에코 제거
-            noiseSuppression: true  // 노이즈 억제
-        }
-    };
-    ```
-    
-    ### 🔄 처리 과정
-    1. **음성 수집**: 클라이언트에서 실시간 마이크 데이터 전송
-    2. **버퍼링**: 1.5초 단위로 오디오 데이터 축적
-    3. **음성인식**: Whisper 모델로 음성을 텍스트로 변환
-    4. **욕설 감지**: 변환된 텍스트에서 욕설 패턴 검색
-    5. **결과 전송**: 감지 결과를 실시간으로 클라이언트에 전송
-    6. **DB 저장**: 욕설 감지 시 사용자별 기록 저장
-    
-    ### ⚡ 성능 최적화
-    - **음성 활동 감지**: 에너지 레벨 0.02 이상일 때만 STT 실행
-    - **50% 오버랩**: 연속성 보장을 위한 버퍼 겹침 처리
-    - **메모리 관리**: 최대 3초 버퍼 크기 제한
-    
-    ### 🚨 연결 종료 사유
-    - 잘못된 `user_id` 제공
-    - 사용자 인증 실패
-    - 네트워크 연결 문제
-    - 클라이언트에서 연결 종료
-    
-    ### 💡 사용 팁
-    - 안정적인 WiFi 환경에서 사용 권장
-    - 마이크 권한 허용 필수
-    - 배경 소음이 적은 환경에서 더 정확한 감지
-    - 브라우저별 WebSocket 지원 확인
-    """
-    await websocket.accept()
-    
-    # WebSocket에서는 URL 파라미터로 user_id를 받음
-    query_params = websocket.query_params
-    user_id = query_params.get("user_id")
-    
-    # 사용자 인증
-    if not user_id or not verify_user(user_id):
-        await websocket.send_json({"error": "인증되지 않은 사용자입니다"})
-        await websocket.close()
-        return
-    
-    print(f"🟢 사용자 {user_id} 연결 - Whisper STT 스트림 시작")
-    
-    global audio_buffer
-    audio_buffer = []
-    
-    try:
-        while True:
-            # 메시지 타입 확인
-            message = await websocket.receive()
-            
-            # 연결 종료 메시지 처리
-            if message["type"] == "websocket.disconnect":
-                break
-            
-            # 텍스트 메시지 처리 (ping, 상태 확인 등)
-            if message["type"] == "websocket.receive" and "text" in message:
-                text_data = message["text"]
-                if text_data == "ping":
-                    await websocket.send_json({"type": "pong", "message": "연결 활성"})
-                    continue
-                elif text_data == "close":
-                    break
-                else:
-                    await websocket.send_json({"type": "error", "message": "오디오 데이터가 필요합니다"})
-                    continue
-            
-            # 바이너리 데이터 처리 (오디오)
-            if message["type"] == "websocket.receive" and "bytes" in message:
-                audio_data = message["bytes"]
-                
-                # 바이트를 NumPy 배열로 변환
-                audio_chunk = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-            else:
-                # 예상하지 못한 메시지 타입
-                await websocket.send_json({"type": "error", "message": "지원하지 않는 메시지 타입입니다"})
-                continue
-            
-            # 버퍼에 추가
-            audio_buffer.extend(audio_chunk)
-            
-            # 버퍼 크기 제한
-            if len(audio_buffer) > max_buffer_length:
-                audio_buffer = audio_buffer[-max_buffer_length:]
-            
-            # 오디오 에너지 계산
-            energy = np.mean(np.abs(audio_chunk)) if len(audio_chunk) > 0 else 0
-            
-            # 버퍼가 충분하면 STT 분석
-            if len(audio_buffer) >= buffer_size:
-                chunk_to_analyze = np.array(audio_buffer[:buffer_size])
-                audio_buffer = audio_buffer[buffer_size//2:]  # 50% 오버랩
-                
-                chunk_energy = np.mean(np.abs(chunk_to_analyze))
-                
-                if chunk_energy > 0.02:  # 음성 활동 감지
-                    print(f"🔊 음성 활동 감지 (에너지: {chunk_energy:.3f}) - STT 실행 중...")
-                    
-                    # Whisper STT 호출
-                    recognized_text = await whisper_service.transcribe(chunk_to_analyze)
-                    
-                    if recognized_text:
-                        # 욕설 감지
-                        result = profanity_service.detect(recognized_text)
-                        
-                        if result["detected"]:
-                            # DB 저장 (외래키 사용)
-                            conn = db.get_connection()
-                            user_model = User(conn)
-                            internal_user_id = user_model.get_user_internal_id(user_id)
-                            
-                            if internal_user_id:
-                                conn.execute(
-                                    "INSERT INTO detections (user_id, text, pattern, patterns, confidence, audio_level, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                    (internal_user_id, recognized_text, result["pattern"], ",".join(result["patterns"]), 
-                                     float(result["confidence"]), float(chunk_energy), datetime.now().isoformat())
-                                )
-                                conn.commit()
-                            conn.close()
-                            
-                            print(f"🔴 욕설 감지! 사용자: {user_id}, 텍스트: '{recognized_text}'")
-                            
-                            response_data = {
-                                "detected": True,
-                                "text": recognized_text,
-                                "pattern": result["pattern"],
-                                "patterns": result["patterns"],
-                                "confidence": result["confidence"],
-                                "energy": chunk_energy,
-                                "timestamp": datetime.now().isoformat()
-                            }
-                            await websocket.send_json(safe_json_convert(response_data))
-                        else:
-                            response_data = {
-                                "detected": False,
-                                "text": recognized_text,
-                                "energy": chunk_energy,
-                                "timestamp": datetime.now().isoformat()
-                            }
-                            await websocket.send_json(safe_json_convert(response_data))
-                    else:
-                        # STT 결과가 없음
-                        response_data = {
-                            "detected": False,
-                            "text": "",
-                            "energy": chunk_energy,
-                            "message": "음성 인식 실패 또는 무음"
-                        }
-                        await websocket.send_json(safe_json_convert(response_data))
-                else:
-                    # 음성 활동 없음
-                    response_data = {
-                        "detected": False,
-                        "text": "",
-                        "energy": chunk_energy,
-                        "message": "음성 활동 없음"
-                    }
-                    await websocket.send_json(safe_json_convert(response_data))
-                    
-    except WebSocketDisconnect:
-        print(f"🔴 사용자 {user_id} 연결 끊김 (클라이언트가 연결 종료)")
-    except Exception as e:
-        print(f"❌ WebSocket 에러 - 사용자 {user_id}: {str(e)}")
-        try:
-            await websocket.send_json({"type": "error", "message": f"서버 에러: {str(e)}"})
-        except:
-            pass
-
-# 감지 레벨 설정
-@app.post("/sensitivity", 
-          tags=["⚙️ 설정"], 
-          summary="감지 레벨 설정",
+# 욕설 저장 API
+@app.post("/save-profanity", 
+          tags=["💾 욕설 저장"], 
+          summary="욕설 저장",
           description="""
-          **욕설 감지 민감도 조정**
+          **프론트엔드에서 이미 감지된 욕설을 DB에 저장합니다.**
           
-          어떤 수준의 욕설까지 감지할지 설정합니다.
+          ### 📤 요청 형식
+          ```json
+          {
+              "text": "감지된 욕설 내용"
+          }
+          ```
           
-          **레벨 설명:**
-          - **1단계 (강)**: 심한 욕설만 감지
-          - **2단계 (중)**: 일반적인 욕설 감지 (기본값)
-          - **3단계 (약)**: 가벼운 욕설까지 모두 감지
+          ### 📥 응답 형식 (실제 예시)
+          ```json
+          {
+              "success": true,
+              "text": "시발 진짜 짜증나네",
+              "timestamp": "2025-08-02T14:30:15",
+              "message": "욕설이 성공적으로 저장되었습니다"
+          }
+          ```
           
-          **추천:**
-          - 처음 사용하시면 2단계부터 시작
-          - 점차 3단계로 올려가면서 욕설 줄이기
+          ### 💡 프론트엔드 처리 가이드
+          - `success: true` → 성공 토스트 메시지 표시
+          - `text` → 저장된 욕설 내용 (로그용)
+          - `timestamp` → 정확한 감지 시간 기록
+          - 통계 카운터 즉시 업데이트 (+1)
+          
+          ### 🔐 인증
+          - 헤더에 `user-id` 필수
+          - 유효하지 않은 `user_id`인 경우 401 에러
+          
+          ### 💾 저장 정보
+          - 프론트엔드에서 이미 감지된 욕설만 전송
+          - 서버는 별도 감지 없이 바로 DB 저장
+          - 통계 및 기록에 즉시 반영
           """)
-async def set_sensitivity(request: SensitivityRequest, user_id: Optional[str] = Header(None)):
+async def save_profanity(request: ProfanityDetect, user_id: Optional[str] = Header(None)):
+    """프론트엔드에서 감지된 욕설 저장"""
     if not user_id or not verify_user(user_id):
         raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다")
     
-    if profanity_service.set_sensitivity(request.sensitivity):
-        return {"sensitivity": request.sensitivity, "message": "감지 레벨 변경 완료"}
-    else:
-        raise HTTPException(status_code=400, detail="잘못된 감지 레벨입니다 (1, 2, 3만 가능)")
+    # DB 저장 (프론트엔드에서 이미 욕설임을 확인했으므로 바로 저장)
+    conn = db.get_connection()
+    user_model = User(conn)
+    internal_user_id = user_model.get_user_internal_id(user_id)
+    
+    if not internal_user_id:
+        conn.close()
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다")
+    
+    # 욕설로 가정하고 저장 (pattern은 텍스트 자체로, confidence는 1.0으로)
+    conn.execute(
+        "INSERT INTO detections (user_id, text, pattern, patterns, confidence, audio_level, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (internal_user_id, request.text, request.text, request.text, 1.0, 0.0, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+    
+    print(f"💾 욕설 저장 완료! 사용자: {user_id}, 텍스트: '{request.text}'")
+    
+    return {
+        "success": True,
+        "text": request.text,
+        "timestamp": datetime.now().isoformat(),
+        "message": "욕설이 성공적으로 저장되었습니다"
+    }
 
-@app.get("/sensitivity", 
-          tags=["⚙️ 설정"], 
-          summary="현재 감지 레벨 조회",
-          description="현재 설정된 욕설 감지 레벨을 확인합니다.")
-async def get_sensitivity(user_id: Optional[str] = Header(None)):
-    if not user_id or not verify_user(user_id):
-        raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다")
-    
-    return {"sensitivity": profanity_service.sensitivity_level}
+
 
 # 통계 조회
 @app.get("/stats", 
@@ -537,9 +323,18 @@ async def get_sensitivity(user_id: Optional[str] = Header(None)):
           
           간단한 통계 정보를 제공합니다.
           
-          **제공 정보:**
-          - 오늘 욕설 감지 횟수와 평균 신뢰도
-          - 이번 주 욕설 감지 횟수와 평균 신뢰도
+          ### 📥 응답 예시
+          ```json
+          {
+              "today": {"count": 12, "avg_confidence": 1.0},
+              "week": {"count": 28, "avg_confidence": 1.0}
+          }
+          ```
+          
+          ### 📊 UI 활용
+          - **오늘 vs 어제**: 개선/악화 추세 표시
+          - **주간 평균**: `week.count / 7` = 일평균 계산
+          - **목표 대비**: 설정한 목표와 비교하여 진행률 표시
           
           **더 자세한 통계는 `/stats/detailed` API를 사용하세요!**
           """)
@@ -585,16 +380,46 @@ async def get_stats(user_id: Optional[str] = Header(None)):
           
           언제, 어떤 욕설을 사용했는지 상세한 기록을 확인합니다.
           
-          **제공 정보:**
-          - 감지된 텍스트와 욕설 패턴
-          - 감지 신뢰도와 음성 레벨
-          - 정확한 감지 시간
-          - 사용자명 정보
+          ### 📥 응답 예시 (limit=3)
+          ```json
+          {
+              "detections": [
+                  {
+                      "text": "시발 진짜 짜증나네",
+                      "pattern": "시발",
+                      "patterns": ["시발"],
+                      "confidence": 1.0,
+                      "audio_level": 0.0,
+                      "timestamp": "2025-08-02T22:30:00",
+                      "username": "이재환"
+                  },
+                  {
+                      "text": "병신같은 버그",
+                      "pattern": "병신",
+                      "patterns": ["병신"],
+                      "confidence": 1.0,
+                      "audio_level": 0.0,
+                      "timestamp": "2025-08-02T21:15:00",
+                      "username": "이재환"
+                  },
+                  {
+                      "text": "씨발 답답해",
+                      "pattern": "씨발",
+                      "patterns": ["씨발"],
+                      "confidence": 1.0,
+                      "audio_level": 0.0,
+                      "timestamp": "2025-08-02T20:25:00",
+                      "username": "이재환"
+                  }
+              ],
+              "count": 3
+          }
+          ```
           
-          **활용 방안:**
-          - 개인 욕설 사용 패턴 분석
-          - 특정 시간대 욕설 사용 확인
-          - 개선 효과 검증
+          ### 🎯 프론트엔드 활용
+          - **타임라인**: `timestamp` 순으로 시간대별 표시
+          - **패턴 분석**: `pattern` 별로 그룹화하여 통계
+          - **개선 추적**: 시간순으로 정렬하여 개선 추세 확인
           """)
 async def get_detections(user_id: Optional[str] = Header(None), limit: int = 10):
     if not user_id or not verify_user(user_id):
@@ -806,14 +631,48 @@ async def stop_recording(user_id: Optional[str] = Header(None)):
           사용자의 욕설 사용 패턴을 시간대별로 분석합니다.
           
           **기간 옵션:**
-          - `today`: 오늘 시간대별 (10시, 12시, 14시, 16시, 18시, 20시, 22시)
+          - `today`: 오늘 0시~24시 1시간 단위 (24개 데이터)
           - `week`: 이번 주 일별 통계
           - `month`: 이번 달 4일 단위 통계
           
-          **활용 방안:**
-          - 언제 욕설을 많이 사용하는지 패턴 분석
-          - 시간대별 개선 목표 설정
-          - 그래프 차트로 시각화 가능
+          ### 📥 today 응답 예시 (실제 목 데이터)
+          ```json
+          {
+              "period": "today",
+              "stats": [
+                  {"hour": "00:00", "count": 0},
+                  {"hour": "01:00", "count": 0},
+                  {"hour": "02:00", "count": 0},
+                  {"hour": "03:00", "count": 0},
+                  {"hour": "04:00", "count": 0},
+                  {"hour": "05:00", "count": 0},
+                  {"hour": "06:00", "count": 0},
+                  {"hour": "07:00", "count": 2},
+                  {"hour": "08:00", "count": 2},
+                  {"hour": "09:00", "count": 1},
+                  {"hour": "10:00", "count": 1},
+                  {"hour": "11:00", "count": 1},
+                  {"hour": "12:00", "count": 3},
+                  {"hour": "13:00", "count": 2},
+                  {"hour": "14:00", "count": 1},
+                  {"hour": "15:00", "count": 2},
+                  {"hour": "16:00", "count": 2},
+                  {"hour": "17:00", "count": 2},
+                  {"hour": "18:00", "count": 2},
+                  {"hour": "19:00", "count": 2},
+                  {"hour": "20:00", "count": 2},
+                  {"hour": "21:00", "count": 1},
+                  {"hour": "22:00", "count": 1},
+                  {"hour": "23:00", "count": 3}
+              ]
+          }
+          ```
+          
+          ### 📊 UI 활용 방안
+          - **시간대별 히트맵**: 색상으로 욕설 빈도 표시
+          - **라인 차트**: 하루 동안의 욕설 사용 패턴
+          - **위험 시간대**: count가 높은 시간대 하이라이트
+          - **개선 목표**: 특정 시간대 욕설 줄이기 목표 설정
           """)
 async def get_detailed_stats(
     period: str = "today",  # today, week, month
@@ -832,21 +691,22 @@ async def get_detailed_stats(
         raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다")
     
     if period == "today":
-        # 오늘 시간대별 통계 (10시, 12시, 14시, 16시, 18시, 20시, 22시)
-        time_slots = ["10:00", "12:00", "14:00", "16:00", "18:00", "20:00", "22:00"]
+        # 오늘 0시~24시 1시간 단위 통계
         stats = []
         
-        for i, time_slot in enumerate(time_slots):
-            next_time = time_slots[i+1] if i+1 < len(time_slots) else "23:59"
+        for hour in range(24):
+            hour_start = f"{hour:02d}:00:00"
+            hour_end = f"{hour+1:02d}:00:00" if hour < 23 else "23:59:59"
+            
             cursor = conn.execute("""
                 SELECT COUNT(*) FROM detections 
                 WHERE user_id = ? 
                 AND date(timestamp) = date('now')
                 AND time(timestamp) >= ? AND time(timestamp) < ?
-            """, (internal_user_id, time_slot, next_time))
+            """, (internal_user_id, hour_start, hour_end))
             
             count = cursor.fetchone()[0]
-            stats.append({"time": time_slot, "count": count})
+            stats.append({"hour": f"{hour:02d}:00", "count": count})
     
     elif period == "week":
         # 이번 주 일별 통계
@@ -934,6 +794,80 @@ async def get_word_stats(user_id: Optional[str] = Header(None)):
     
     conn.close()
     return {"words": word_stats}
+
+@app.get("/stats/top-words", 
+          tags=["📊 통계 화면"], 
+          summary="상위 5개 욕설 조회",
+          description="""
+          **내가 가장 많이 사용한 상위 5개 욕설**
+          
+          가장 자주 사용하는 욕설 5개를 빈도순으로 반환합니다.
+          
+          ### 📥 응답 형식 (실제 목 데이터 예시)
+          ```json
+          {
+              "top_words": [
+                  {"word": "시발", "count": 8},
+                  {"word": "씨발", "count": 7},
+                  {"word": "병신", "count": 6},
+                  {"word": "미친", "count": 5},
+                  {"word": "개짜증", "count": 2}
+              ],
+              "total_count": 28
+          }
+          ```
+          
+          ### 📊 UI 활용 가이드
+          - **워드 클라우드**: `word`와 `count`로 크기 조절
+          - **진행률 바**: `count / total_count * 100`으로 비율 계산
+          - **목표 설정**: 가장 많이 사용한 단어부터 줄이기 목표 설정
+          
+          ### 🔐 인증
+          - 헤더에 `user-id` 필수
+          
+          ### 📊 활용 방안
+          - 자주 사용하는 욕설 파악
+          - 개선 목표 설정에 활용
+          - 진행상황 추적
+          """)
+async def get_top_words(user_id: Optional[str] = Header(None)):
+    """상위 5개 욕설 조회"""
+    if not user_id or not verify_user(user_id):
+        raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다")
+    
+    conn = db.get_connection()
+    user_model = User(conn)
+    internal_user_id = user_model.get_user_internal_id(user_id)
+    
+    if not internal_user_id:
+        conn.close()
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다")
+    
+    # 상위 5개 욕설 조회
+    cursor = conn.execute("""
+        SELECT pattern, COUNT(*) as count
+        FROM detections 
+        WHERE user_id = ? AND pattern IS NOT NULL
+        GROUP BY pattern
+        ORDER BY count DESC
+        LIMIT 5
+    """, (internal_user_id,))
+    
+    top_words = []
+    total_count = 0
+    for row in cursor.fetchall():
+        word_data = {
+            "word": row[0],
+            "count": row[1]
+        }
+        top_words.append(word_data)
+        total_count += row[1]
+    
+    conn.close()
+    return {
+        "top_words": top_words,
+        "total_count": total_count
+    }
 
 # ========== 그룹 스크린 API ==========
 
@@ -1033,23 +967,72 @@ async def join_group(group_data: GroupJoin, user_id: Optional[str] = Header(None
 
 @app.get("/groups/my", 
           tags=["👥 그룹 화면"], 
-          summary="내 그룹 목록",
+          summary="내 그룹 목록 (상세정보)",
           description="""
-          **참여 중인 그룹 목록 조회**
+          **참여 중인 그룹 목록과 상세 정보 한번에 조회**
           
-          현재 사용자가 참여하고 있는 모든 그룹의 정보를 확인합니다.
+          현재 사용자가 참여하고 있는 모든 그룹의 정보를 상세하게 확인합니다.
           
-          **제공 정보:**
-          - 그룹명과 초대 코드
-          - 그룹 소유자 정보
-          - 현재 멤버 수
-          - 내가 관리자인지 여부
-          - 그룹 생성일
+          ### 📥 응답 형식 (실제 목 데이터 예시)
+          ```json
+          {
+              "groups": [
+                  {
+                      "id": 5,
+                      "name": "욕설 줄이기 챌린지",
+                      "invite_code": "KDY7ZX",
+                      "owner_id": 2,
+                      "bet_deadline": "2025-10-02 08:58:00",
+                      "created_at": "2025-08-02 19:58:17",
+                      "owner_name": "test",
+                      "member_count": 5,
+                      "is_owner": true,
+                      "banned_words": ["바보", "멍청이", "아햏햏", "얼간이", "돌대가리"],
+                      "most_profanity_users": [
+                          {"username": "이재환", "count": 28},
+                          {"username": "test", "count": 17},
+                          {"username": "testuser", "count": 8},
+                          {"username": "testuser2", "count": 3},
+                          {"username": "재환", "count": 1}
+                      ],
+                      "least_profanity_users": [
+                          {"username": "재환", "count": 1},
+                          {"username": "testuser2", "count": 3},
+                          {"username": "testuser", "count": 8},
+                          {"username": "test", "count": 17},
+                          {"username": "이재환", "count": 28}
+                      ]
+                  }
+              ]
+          }
+          ```
           
-          **그룹을 터치하면 상세 정보와 순위를 볼 수 있습니다!**
+          ### 📊 데이터 해석 가이드
+          **욕설 순위 이해하기:**
+          - `most_profanity_users`: 욕설을 많이 사용한 순서 (개선이 필요한 사용자들)
+          - `least_profanity_users`: 욕설을 적게 사용한 순서 (모범적인 사용자들)
+          - 같은 사용자가 두 배열에 모두 포함되며, 순서만 반대입니다
+          
+          **UI 활용 팁:**
+          - 🔴 `most_profanity_users[0]`: "욕설 사용 1위" (빨간색 표시)
+          - 🟡 `most_profanity_users[1-2]`: "주의 필요" (노란색 표시)  
+          - 🟢 `least_profanity_users[0]`: "모범 사용자" (초록색 표시)
+          - `banned_words`: 그룹 설정에서 관리, 관리자만 추가/삭제 가능
+          
+          ### 🔍 제공 정보
+          - **기본 그룹 정보**: 그룹명, 초대코드, 소유자, 멤버수
+          - **욕설 순위**: 가장 많이 사용한 사용자 순서
+          - **모범 순위**: 가장 적게 사용한 사용자 순서  
+          - **금지어 목록**: 그룹에서 설정한 금지어들
+          - **관리자 여부**: 내가 관리자인지 확인
+          
+          ### 📊 활용 방안
+          - 그룹별 상세 현황 파악
+          - 멤버들의 욕설 사용 현황 비교
+          - 그룹 관리 및 순위 확인
           """)
 async def get_my_groups(user_id: Optional[str] = Header(None)):
-    """내가 참여한 그룹 목록"""
+    """내가 참여한 그룹 목록과 상세 정보"""
     if not user_id or not verify_user(user_id):
         raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다")
     
@@ -1062,9 +1045,42 @@ async def get_my_groups(user_id: Optional[str] = Header(None)):
         conn.close()
         raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다")
     
+    # 기본 그룹 정보 조회
     groups = group_model.get_user_groups(internal_user_id)
-    conn.close()
     
+    # 각 그룹별 상세 정보 추가
+    for group in groups:
+        group_id = group["id"]  # "group_id"가 아니라 "id"
+        
+        # 1. 금지어 목록 조회
+        banned_words = group_model.get_banned_words(group_id)
+        group["banned_words"] = banned_words  # 이미 문자열 리스트로 반환됨
+        
+        # 2. 그룹 멤버들의 욕설 사용 순위 조회 (가장 많이 사용한 순)
+        cursor = conn.execute("""
+            SELECT u.username, COUNT(d.id) as count
+            FROM group_members gm
+            JOIN users u ON gm.user_id = u.id
+            LEFT JOIN detections d ON u.id = d.user_id
+            WHERE gm.group_id = ?
+            GROUP BY u.id, u.username
+            ORDER BY count DESC
+        """, (group_id,))
+        
+        all_members = []
+        for row in cursor.fetchall():
+            all_members.append({
+                "username": row[0],
+                "count": row[1]
+            })
+        
+        # 3. 가장 많이 사용한 사용자들 (상위 멤버들)
+        group["most_profanity_users"] = all_members
+        
+        # 4. 가장 적게 사용한 사용자들 (하위 멤버들 - 역순)
+        group["least_profanity_users"] = list(reversed(all_members))
+    
+    conn.close()
     return {"groups": groups}
 
 @app.post("/groups/banned-words", 
@@ -1184,6 +1200,91 @@ async def get_group_ranking(
         "worst_performers": worst_users,  # 욕설 많이 한 순
         "full_ranking": ranking
     }
+
+# ========== 개발/테스트용 API ==========
+
+@app.delete("/admin/reset-all-data", 
+           tags=["🔧 관리자"], 
+           summary="모든 데이터 초기화",
+           description="""
+           **⚠️ 위험: 모든 테이블의 데이터를 완전히 삭제합니다**
+           
+           시연 영상 촬영이나 테스트 목적으로 모든 데이터를 초기화합니다.
+           
+           ### 🗑️ 삭제되는 데이터
+           - **사용자 계정** (`users` 테이블)
+           - **욕설 감지 기록** (`detections` 테이블)
+           - **그룹 정보** (`groups` 테이블)
+           - **그룹 멤버** (`group_members` 테이블)
+           - **그룹 금지어** (`group_banned_words` 테이블)
+           
+           ### 📥 응답 예시
+           ```json
+           {
+               "success": true,
+               "message": "모든 데이터가 성공적으로 초기화되었습니다",
+               "deleted_tables": [
+                   "detections", "group_banned_words", "group_members", 
+                   "groups", "users"
+               ],
+               "timestamp": "2025-08-02T23:30:00"
+           }
+           ```
+           
+           ### ⚠️ 주의사항
+           - **돌이킬 수 없는 작업**입니다
+           - **시연 목적**으로만 사용하세요
+           - **외래키 제약조건** 순서에 따라 안전하게 삭제됩니다
+           - 삭제 후 새로운 사용자 등록부터 다시 시작해야 합니다
+           
+           ### 🎬 시연 시나리오
+           1. 이 API 호출로 데이터 초기화
+           2. 새 사용자 등록 (`/auth/register`)
+           3. 그룹 생성 (`/groups/create`)
+           4. 욕설 저장 (`/save-profanity`)
+           5. 통계 확인 (`/stats/*`)
+           """)
+async def reset_all_data():
+    """모든 테이블 데이터 초기화 (시연용)"""
+    try:
+        conn = db.get_connection()
+        
+        # 외래키 제약조건 순서에 따라 삭제
+        tables_to_clear = [
+            "detections",           # 욕설 감지 기록
+            "group_banned_words",   # 그룹 금지어
+            "group_members",        # 그룹 멤버
+            "groups",              # 그룹
+            "users"                # 사용자
+        ]
+        
+        deleted_tables = []
+        
+        for table in tables_to_clear:
+            cursor = conn.execute(f"DELETE FROM {table}")
+            deleted_count = cursor.rowcount
+            deleted_tables.append(f"{table} ({deleted_count}개)")
+            print(f"🗑️ {table} 테이블에서 {deleted_count}개 데이터 삭제")
+        
+        # AUTO_INCREMENT 카운터도 초기화
+        for table in tables_to_clear:
+            conn.execute(f"DELETE FROM sqlite_sequence WHERE name='{table}'")
+        
+        conn.commit()
+        conn.close()
+        
+        print("✅ 모든 데이터 초기화 완료!")
+        
+        return {
+            "success": True,
+            "message": "모든 데이터가 성공적으로 초기화되었습니다",
+            "deleted_tables": deleted_tables,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"❌ 데이터 초기화 실패: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"데이터 초기화 실패: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
