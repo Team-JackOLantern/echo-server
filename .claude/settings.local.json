@@ -9,7 +9,8 @@
       "Bash(mkdir:*)",
       "Bash(mv:*)",
       "Bash(sqlite3:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(true)"
     ],
     "deny": []
   }

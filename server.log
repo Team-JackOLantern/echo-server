@@ -1,0 +1,19 @@
+INFO:     Started server process [60071]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+✅ users 테이블 이미 존재
+✅ detections 테이블 이미 올바른 스키마로 존재
+📊 인덱스 생성/확인 완료
+🗄️ 데이터베이스 초기화 완료 (기존 users 데이터 보존)
+🤖 Whisper 모델 로딩 중...
+✅ Whisper 모델 로드 완료
+🎯 로드된 패턴 (2 레벨): 20개
+🚀 모듈화된 실시간 욕설 감지 서버 시작
+INFO:     127.0.0.1:61856 - "GET /health HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:61896 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61905 - "GET /docs HTTP/1.1" 200 OK
+INFO:     183.96.52.165:0 - "GET /docs HTTP/1.1" 200 OK
+email-validator not installed, email fields will be treated as str.
+To install, run: pip install email-validator
+INFO:     183.96.52.165:0 - "GET /openapi.json HTTP/1.1" 200 OK
