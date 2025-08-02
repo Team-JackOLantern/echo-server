@@ -1,102 +1,115 @@
 import sqlite3
-from datetime import datetime
-from pathlib import Path
-import numpy as np
 import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import re
+import numpy as np
+from datetime import datetime
+from typing import Optional
 
-app = FastAPI()
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-# 실시간 키워드 감지용 욕설 패턴
-PROFANITY_PATTERNS = {
-    1: ["씨발", "시발", "병신", "좆", "썅", "개새끼"],
-    2: ["새끼", "지랄", "엿", "개놈", "개년", "아가리", "ㅗ", "ㅅㅂ"],
-    3: ["미친", "빡치", "짜증", "꺼져", "닥쳐", "바보", "멍청", "ㅄ", "ㅆㅂ"]
-}
+from models.database import Database
+from models.user import User
+from services.whisper_service import WhisperService
+from services.profanity_service import ProfanityService
+from utils.helpers import safe_json_convert
 
-sensitivity_level = 2
+# FastAPI 앱 생성
+app = FastAPI(title="실시간 욕설 감지 서버")
+
+# CORS 미들웨어
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 전역 변수
+db = Database()
+whisper_service = WhisperService()
+profanity_service = ProfanityService()
+
+# 오디오 버퍼 설정
 audio_buffer = []
-buffer_size = 4000  # 0.25초 버퍼 (16kHz)
+buffer_size = 24000  # 1.5초 버퍼
+max_buffer_length = 48000  # 최대 3초
 
-def init_db():
-    conn = sqlite3.connect("data.db")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS detections (
-            id INTEGER PRIMARY KEY,
-            pattern TEXT,
-            confidence REAL,
-            audio_level REAL,
-            timestamp TEXT
-        )
-    """)
+# Pydantic 모델들
+class UserRegister(BaseModel):
+    username: str
+    password: str
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class SensitivityRequest(BaseModel):
+    sensitivity: int
+
+# 인증 관련 엔드포인트
+@app.post("/auth/register")
+async def register(user_data: UserRegister):
+    """사용자 등록"""
+    conn = db.get_connection()
+    user_model = User(conn)
+    
+    result = user_model.create_user(user_data.username, user_data.password)
     conn.close()
+    
+    if result["success"]:
+        return {"user_id": result["user_id"], "message": result["message"]}
+    else:
+        raise HTTPException(status_code=400, detail=result["message"])
 
-def get_profanity_patterns(sensitivity: int) -> list:
-    patterns = []
-    for level in range(1, sensitivity + 1):
-        patterns.extend(PROFANITY_PATTERNS.get(level, []))
-    return patterns
+@app.post("/auth/login")
+async def login(user_data: UserLogin):
+    """사용자 로그인"""
+    conn = db.get_connection()
+    user_model = User(conn)
+    
+    result = user_model.authenticate(user_data.username, user_data.password)
+    conn.close()
+    
+    if result["success"]:
+        return {"user_id": result["user_id"], "message": result["message"]}
+    else:
+        raise HTTPException(status_code=401, detail=result["message"])
 
-def detect_profanity_realtime(audio_chunk: np.ndarray, patterns: list) -> dict:
-    # 오디오 에너지 계산
-    energy = np.mean(np.abs(audio_chunk))
-    rms = np.sqrt(np.mean(audio_chunk**2))
-    
-    # 간단한 음성 활동 감지
-    if energy < 0.01:
-        return {"detected": False, "pattern": None, "confidence": 0, "energy": energy}
-    
-    # 주파수 분석 (FFT)
-    fft = np.fft.fft(audio_chunk)
-    freqs = np.fft.fftfreq(len(audio_chunk), 1/16000)
-    magnitude = np.abs(fft)
-    
-    # 욕설 특성 감지 (간단한 휴리스틱)
-    # 1. 높은 에너지 + 급격한 변화
-    # 2. 특정 주파수 대역 강조
-    high_freq_energy = np.mean(magnitude[freqs > 2000])
-    mid_freq_energy = np.mean(magnitude[(freqs > 500) & (freqs < 2000)])
-    
-    # 욕설 패턴 점수 계산
-    profanity_score = 0
-    if rms > 0.1:  # 충분한 음성 에너지
-        profanity_score += 0.3
-    if high_freq_energy > mid_freq_energy * 1.5:  # 고주파 강조
-        profanity_score += 0.4
-    if energy > 0.05:  # 강한 음성
-        profanity_score += 0.3
-    
-    detected = profanity_score > 0.7
-    pattern = "audio_pattern" if detected else None
-    
-    return {
-        "detected": detected,
-        "pattern": pattern,
-        "confidence": profanity_score,
-        "energy": energy,
-        "rms": rms
-    }
+# 사용자 검증 함수
+def verify_user(user_id: str) -> bool:
+    """사용자 ID 검증"""
+    conn = db.get_connection()
+    user_model = User(conn)
+    user = user_model.get_user_by_id(user_id)
+    conn.close()
+    return user is not None
 
-@app.on_event("startup")
-async def startup():
-    init_db()
-    print("🚀 실시간 욕설 감지 서버 시작")
-    print(f"📊 감지 레벨: {sensitivity_level} (1=강, 2=중, 3=약)")
-    print("🎯 실시간 오디오 스트림 대기 중")
-
+# 기본 엔드포인트
 @app.get("/")
 async def root():
-    return {"message": "실시간 욕설 감지 서버"}
+    return {"message": "실시간 욕설 감지 서버 (모듈화 버전)"}
 
+# WebSocket 엔드포인트
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("🟢 클라이언트 연결 - 실시간 스트림 시작")
+    
+    # WebSocket에서는 URL 파라미터로 user_id를 받음
+    query_params = websocket.query_params
+    user_id = query_params.get("user_id")
+    
+    # 사용자 인증
+    if not user_id or not verify_user(user_id):
+        await websocket.send_json({"error": "인증되지 않은 사용자입니다"})
+        await websocket.close()
+        return
+    
+    print(f"🟢 사용자 {user_id} 연결 - Whisper STT 스트림 시작")
     
     global audio_buffer
     audio_buffer = []
-    patterns = get_profanity_patterns(sensitivity_level)
     
     try:
         while True:
@@ -108,71 +121,120 @@ async def websocket_endpoint(websocket: WebSocket):
             # 버퍼에 추가
             audio_buffer.extend(audio_chunk)
             
-            # 버퍼가 충분하면 분석
+            # 버퍼 크기 제한
+            if len(audio_buffer) > max_buffer_length:
+                audio_buffer = audio_buffer[-max_buffer_length:]
+            
+            # 오디오 에너지 계산
+            energy = np.mean(np.abs(audio_chunk)) if len(audio_chunk) > 0 else 0
+            
+            # 버퍼가 충분하면 STT 분석
             if len(audio_buffer) >= buffer_size:
-                # 분석할 청크 추출
                 chunk_to_analyze = np.array(audio_buffer[:buffer_size])
                 audio_buffer = audio_buffer[buffer_size//2:]  # 50% 오버랩
                 
-                # 실시간 욕설 감지
-                result = detect_profanity_realtime(chunk_to_analyze, patterns)
+                chunk_energy = np.mean(np.abs(chunk_to_analyze))
                 
-                print(f"🔊 에너지:{result['energy']:.3f} RMS:{result['rms']:.3f} 점수:{result['confidence']:.2f}")
-                
-                if result["detected"]:
-                    # DB 저장
-                    conn = sqlite3.connect("data.db")
-                    conn.execute(
-                        "INSERT INTO detections (pattern, confidence, audio_level, timestamp) VALUES (?, ?, ?, ?)",
-                        (result["pattern"], result["confidence"], result["energy"], datetime.now().isoformat())
-                    )
-                    conn.commit()
-                    conn.close()
+                if chunk_energy > 0.02:  # 음성 활동 감지
+                    print(f"🔊 음성 활동 감지 (에너지: {chunk_energy:.3f}) - STT 실행 중...")
                     
-                    print(f"🔴 욕설 감지! 신뢰도: {result['confidence']:.2f}")
+                    # Whisper STT 호출
+                    recognized_text = await whisper_service.transcribe(chunk_to_analyze)
                     
-                    await websocket.send_json({
-                        "detected": True,
-                        "pattern": result["pattern"],
-                        "confidence": result["confidence"],
-                        "energy": result["energy"],
-                        "timestamp": datetime.now().isoformat()
-                    })
+                    if recognized_text:
+                        # 욕설 감지
+                        result = profanity_service.detect(recognized_text)
+                        
+                        if result["detected"]:
+                            # DB 저장
+                            conn = db.get_connection()
+                            conn.execute(
+                                "INSERT INTO detections (user_id, text, pattern, patterns, confidence, audio_level, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (user_id, recognized_text, result["pattern"], ",".join(result["patterns"]), 
+                                 float(result["confidence"]), float(chunk_energy), datetime.now().isoformat())
+                            )
+                            conn.commit()
+                            conn.close()
+                            
+                            print(f"🔴 욕설 감지! 사용자: {user_id}, 텍스트: '{recognized_text}'")
+                            
+                            response_data = {
+                                "detected": True,
+                                "text": recognized_text,
+                                "pattern": result["pattern"],
+                                "patterns": result["patterns"],
+                                "confidence": result["confidence"],
+                                "energy": chunk_energy,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            await websocket.send_json(safe_json_convert(response_data))
+                        else:
+                            response_data = {
+                                "detected": False,
+                                "text": recognized_text,
+                                "energy": chunk_energy,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            await websocket.send_json(safe_json_convert(response_data))
+                    else:
+                        # STT 결과가 없음
+                        response_data = {
+                            "detected": False,
+                            "text": "",
+                            "energy": chunk_energy,
+                            "message": "음성 인식 실패 또는 무음"
+                        }
+                        await websocket.send_json(safe_json_convert(response_data))
                 else:
-                    await websocket.send_json({
+                    # 음성 활동 없음
+                    response_data = {
                         "detected": False,
-                        "energy": result["energy"],
-                        "rms": result["rms"]
-                    })
+                        "text": "",
+                        "energy": chunk_energy,
+                        "message": "음성 활동 없음"
+                    }
+                    await websocket.send_json(safe_json_convert(response_data))
                     
     except WebSocketDisconnect:
-        print("🔴 클라이언트 연결 끊김")
+        print(f"🔴 사용자 {user_id} 연결 끊김")
 
+# 감지 레벨 설정
 @app.post("/sensitivity")
-async def set_sensitivity(sensitivity: int):
-    global sensitivity_level
-    if sensitivity not in [1, 2, 3]:
-        return {"error": "Sensitivity must be 1, 2, or 3"}
-    old_level = sensitivity_level
-    sensitivity_level = sensitivity
-    level_names = {1: "강", 2: "중", 3: "약"}
-    print(f"⚙️ 감지 레벨 변경: {level_names[old_level]} → {level_names[sensitivity]}")
-    return {"sensitivity": sensitivity}
+async def set_sensitivity(request: SensitivityRequest, user_id: Optional[str] = Header(None)):
+    if not user_id or not verify_user(user_id):
+        raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다")
+    
+    if profanity_service.set_sensitivity(request.sensitivity):
+        return {"sensitivity": request.sensitivity, "message": "감지 레벨 변경 완료"}
+    else:
+        raise HTTPException(status_code=400, detail="잘못된 감지 레벨입니다 (1, 2, 3만 가능)")
 
 @app.get("/sensitivity")
-async def get_sensitivity():
-    return {"sensitivity": sensitivity_level}
+async def get_sensitivity(user_id: Optional[str] = Header(None)):
+    if not user_id or not verify_user(user_id):
+        raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다")
+    
+    return {"sensitivity": profanity_service.sensitivity_level}
 
+# 통계 조회
 @app.get("/stats")
-async def get_stats():
-    conn = sqlite3.connect("data.db")
+async def get_stats(user_id: Optional[str] = Header(None)):
+    if not user_id or not verify_user(user_id):
+        raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다")
+    
+    conn = db.get_connection()
+    
+    # 오늘 통계
     cursor = conn.execute(
-        "SELECT COUNT(*), AVG(confidence) FROM detections WHERE date(timestamp) = date('now')"
+        "SELECT COUNT(*), AVG(confidence) FROM detections WHERE user_id = ? AND date(timestamp) = date('now')",
+        (user_id,)
     )
     today_count, today_avg = cursor.fetchone()
     
+    # 일주일 통계
     cursor = conn.execute(
-        "SELECT COUNT(*), AVG(confidence) FROM detections WHERE date(timestamp) >= date('now', '-7 days')"
+        "SELECT COUNT(*), AVG(confidence) FROM detections WHERE user_id = ? AND date(timestamp) >= date('now', '-7 days')",
+        (user_id,)
     )
     week_count, week_avg = cursor.fetchone()
     
@@ -185,4 +247,5 @@ async def get_stats():
 
 if __name__ == "__main__":
     import uvicorn
+    print("🚀 모듈화된 실시간 욕설 감지 서버 시작")
     uvicorn.run(app, host="0.0.0.0", port=8000)

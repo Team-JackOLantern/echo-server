@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>실시간 욕설 감지 클라이언트 (인증 포함)</title>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .auth-section, .main-section { 
+            border: 1px solid #ddd; 
+            padding: 20px; 
+            margin: 10px 0; 
+            border-radius: 5px; 
+        }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .connected { background-color: #d4edda; color: #155724; }
+        .disconnected { background-color: #f8d7da; color: #721c24; }
+        .authenticated { background-color: #d1ecf1; color: #0c5460; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+        input { padding: 8px; margin: 5px; width: 200px; }
+        .disabled { opacity: 0.5; cursor: not-allowed; }
+        #log { border: 1px solid #ccc; height: 250px; overflow-y: scroll; padding: 10px; background: #f9f9f9; }
+        .controls { margin: 20px 0; }
+        .hidden { display: none; }
+        .user-info { background: #e8f5e8; padding: 10px; border-radius: 5px; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 실시간 욕설 감지 (인증 시스템)</h1>
+        
+        <!-- 인증 섹션 -->
+        <div id="authSection" class="auth-section">
+            <h2>사용자 인증</h2>
+            <div id="authStatus" class="status disconnected">로그인이 필요합니다</div>
+            
+            <div id="loginForm">
+                <h3>로그인</h3>
+                <input type="text" id="loginUsername" placeholder="사용자명" />
+                <input type="password" id="loginPassword" placeholder="비밀번호" />
+                <button onclick="login()">로그인</button>
+                <button onclick="showRegisterForm()">회원가입</button>
+            </div>
+            
+            <div id="registerForm" class="hidden">
+                <h3>회원가입</h3>
+                <input type="text" id="registerUsername" placeholder="사용자명" />
+                <input type="password" id="registerPassword" placeholder="비밀번호" />
+                <button onclick="register()">가입하기</button>
+                <button onclick="showLoginForm()">로그인으로 돌아가기</button>
+            </div>
+            
+            <div id="userInfo" class="user-info hidden">
+                <strong>로그인된 사용자:</strong> <span id="currentUser"></span>
+                <button onclick="logout()">로그아웃</button>
+            </div>
+        </div>
+        
+        <!-- 메인 기능 섹션 -->
+        <div id="mainSection" class="main-section hidden">
+            <div id="wsStatus" class="status disconnected">WebSocket 연결 끊김</div>
+            
+            <div class="controls">
+                <button id="connectBtn" onclick="connect()">연결</button>
+                <button id="disconnectBtn" onclick="disconnect()" class="disabled">연결 끊기</button>
+                <button id="startRecordBtn" onclick="startRecording()" class="disabled">녹음 시작</button>
+                <button id="stopRecordBtn" onclick="stopRecording()" class="disabled">녹음 중지</button>
+            </div>
+            
+            <div class="controls">
+                <label>감지 레벨: </label>
+                <button onclick="setSensitivity(1)">강 (1)</button>
+                <button onclick="setSensitivity(2)">중 (2)</button>
+                <button onclick="setSensitivity(3)">약 (3)</button>
+                <span id="currentSensitivity">현재: 2</span>
+            </div>
+            
+            <div>
+                <h3>실시간 음성인식 및 감지 결과</h3>
+                <div id="currentText" style="background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px;">
+                    <strong>인식된 텍스트:</strong> <span id="recognizedText">대기 중...</span>
+                </div>
+                <div id="log"></div>
+                <button onclick="clearLog()">로그 지우기</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let userToken = null;
+        let ws = null;
+        let audioContext = null;
+        let isRecording = false;
+
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            const color = type === 'detection' ? 'red' : type === 'error' ? 'red' : 'black';
+            logDiv.innerHTML += `<div style="color: ${color};">[${timestamp}] ${message}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function showRegisterForm() {
+            document.getElementById('loginForm').className = 'hidden';
+            document.getElementById('registerForm').className = '';
+        }
+
+        function showLoginForm() {
+            document.getElementById('registerForm').className = 'hidden';
+            document.getElementById('loginForm').className = '';
+        }
+
+        async function register() {
+            const username = document.getElementById('registerUsername').value;
+            const password = document.getElementById('registerPassword').value;
+
+            if (!username || !password) {
+                alert('사용자명과 비밀번호를 입력하세요');
+                return;
+            }
+
+            try {
+                const response = await fetch('http://localhost:8000/auth/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    alert(`회원가입 성공! 사용자 ID: ${data.user_id}`);
+                    showLoginForm();
+                } else {
+                    alert('회원가입 실패: ' + data.detail);
+                }
+            } catch (err) {
+                alert('회원가입 오류: ' + err.message);
+            }
+        }
+
+        async function login() {
+            const username = document.getElementById('loginUsername').value;
+            const password = document.getElementById('loginPassword').value;
+
+            if (!username || !password) {
+                alert('사용자명과 비밀번호를 입력하세요');
+                return;
+            }
+
+            try {
+                const response = await fetch('http://localhost:8000/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    userToken = data.user_id;
+                    document.getElementById('currentUser').textContent = username + ` (${data.user_id})`;
+                    document.getElementById('authStatus').textContent = '인증 완료';
+                    document.getElementById('authStatus').className = 'status authenticated';
+                    document.getElementById('loginForm').className = 'hidden';
+                    document.getElementById('userInfo').className = 'user-info';
+                    document.getElementById('mainSection').className = 'main-section';
+                    
+                    // 현재 감지 레벨 가져오기
+                    getSensitivity();
+                } else {
+                    alert('로그인 실패: ' + data.detail);
+                }
+            } catch (err) {
+                alert('로그인 오류: ' + err.message);
+            }
+        }
+
+        function logout() {
+            userToken = null;
+            document.getElementById('authStatus').textContent = '로그인이 필요합니다';
+            document.getElementById('authStatus').className = 'status disconnected';
+            document.getElementById('userInfo').className = 'user-info hidden';
+            document.getElementById('mainSection').className = 'main-section hidden';
+            document.getElementById('loginForm').className = '';
+            
+            // WebSocket 연결 종료
+            if (ws) {
+                ws.close();
+            }
+            if (audioContext) {
+                audioContext.close();
+            }
+        }
+
+        function connect() {
+            if (!userToken) {
+                alert('먼저 로그인하세요');
+                return;
+            }
+            
+            if (ws) return;
+            
+            // 헤더에 user_id 포함하여 WebSocket 연결
+            ws = new WebSocket(`ws://localhost:8000/ws`, [], {
+                headers: {
+                    'user-id': userToken
+                }
+            });
+            
+            // WebSocket은 헤더를 직접 지원하지 않으므로 URL 파라미터로 전달
+            ws = new WebSocket(`ws://localhost:8000/ws?user_id=${userToken}`);
+            
+            ws.onopen = function() {
+                document.getElementById('wsStatus').textContent = 'WebSocket 연결됨';
+                document.getElementById('wsStatus').className = 'status connected';
+                document.getElementById('connectBtn').className = 'disabled';
+                document.getElementById('disconnectBtn').className = '';
+                document.getElementById('startRecordBtn').className = '';
+                log('WebSocket 연결 성공');
+            };
+            
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                
+                if (data.error) {
+                    log('오류: ' + data.error, 'error');
+                    return;
+                }
+                
+                // 인식된 텍스트 표시
+                const recognizedTextElement = document.getElementById('recognizedText');
+                if (data.text) {
+                    recognizedTextElement.textContent = data.text;
+                    recognizedTextElement.style.color = data.detected ? 'red' : 'green';
+                } else if (data.message) {
+                    recognizedTextElement.textContent = data.message;
+                    recognizedTextElement.style.color = 'gray';
+                }
+                
+                // 로그 표시
+                if (data.detected) {
+                    log(`🔴 욕설 감지! 텍스트: "${data.text}" | 패턴: [${data.patterns ? data.patterns.join(', ') : data.pattern}] | 신뢰도: ${data.confidence.toFixed(2)}`, 'detection');
+                } else if (data.text) {
+                    log(`🟢 정상 텍스트: "${data.text}"`);
+                } else {
+                    log(`ℹ️ ${data.message || '음성 활동 없음'}`);
+                }
+            };
+            
+            ws.onclose = function() {
+                document.getElementById('wsStatus').textContent = 'WebSocket 연결 끊김';
+                document.getElementById('wsStatus').className = 'status disconnected';
+                document.getElementById('connectBtn').className = '';
+                document.getElementById('disconnectBtn').className = 'disabled';
+                document.getElementById('startRecordBtn').className = 'disabled';
+                document.getElementById('stopRecordBtn').className = 'disabled';
+                log('WebSocket 연결 끊김', 'error');
+                ws = null;
+                if (isRecording) {
+                    stopRecording();
+                }
+            };
+            
+            ws.onerror = function(error) {
+                log('WebSocket 오류: ' + error, 'error');
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+
+        async function startRecording() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('먼저 WebSocket에 연결하세요');
+                return;
+            }
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: false,
+                        noiseSuppression: false
+                    } 
+                });
+                
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(stream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                
+                processor.onaudioprocess = function(e) {
+                    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                    
+                    const inputBuffer = e.inputBuffer.getChannelData(0);
+                    const int16Buffer = new Int16Array(inputBuffer.length);
+                    for (let i = 0; i < inputBuffer.length; i++) {
+                        int16Buffer[i] = Math.max(-32768, Math.min(32767, inputBuffer[i] * 32768));
+                    }
+                    ws.send(int16Buffer.buffer);
+                };
+                
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+                
+                isRecording = true;
+                document.getElementById('startRecordBtn').className = 'disabled';
+                document.getElementById('stopRecordBtn').className = '';
+                log('🎤 녹음 시작 - 실시간 오디오 전송 중');
+                
+            } catch (err) {
+                log('마이크 접근 오류: ' + err.message, 'error');
+            }
+        }
+
+        function stopRecording() {
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            isRecording = false;
+            document.getElementById('startRecordBtn').className = '';
+            document.getElementById('stopRecordBtn').className = 'disabled';
+            log('🛑 녹음 중지');
+        }
+
+        async function setSensitivity(level) {
+            if (!userToken) return;
+            
+            try {
+                const response = await fetch('http://localhost:8000/sensitivity', {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'user-id': userToken
+                    },
+                    body: JSON.stringify({ sensitivity: level })
+                });
+                const data = await response.json();
+                document.getElementById('currentSensitivity').textContent = `현재: ${level}`;
+                log(`⚙️ 감지 레벨 변경: ${level}`);
+            } catch (err) {
+                log('감지 레벨 변경 오류: ' + err.message, 'error');
+            }
+        }
+
+        async function getSensitivity() {
+            if (!userToken) return;
+            
+            try {
+                const response = await fetch('http://localhost:8000/sensitivity', {
+                    headers: { 'user-id': userToken }
+                });
+                const data = await response.json();
+                document.getElementById('currentSensitivity').textContent = `현재: ${data.sensitivity}`;
+            } catch (err) {
+                log('감지 레벨 확인 오류: ' + err.message, 'error');
+            }
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+    </script>
+</body>
+</html>
