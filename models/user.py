@@ -70,3 +70,12 @@ class User:
                 "created_at": result[3]
             }
         return None
+    
+    def get_user_internal_id(self, user_id: str) -> Optional[int]:
+        """사용자 ID로 내부 ID 조회 (외래키용)"""
+        cursor = self.conn.execute(
+            "SELECT id FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        result = cursor.fetchone()
+        return result[0] if result else None

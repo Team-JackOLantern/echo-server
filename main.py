@@ -146,14 +146,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         result = profanity_service.detect(recognized_text)
                         
                         if result["detected"]:
-                            # DB 저장
+                            # DB 저장 (외래키 사용)
                             conn = db.get_connection()
-                            conn.execute(
-                                "INSERT INTO detections (user_id, text, pattern, patterns, confidence, audio_level, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (user_id, recognized_text, result["pattern"], ",".join(result["patterns"]), 
-                                 float(result["confidence"]), float(chunk_energy), datetime.now().isoformat())
-                            )
-                            conn.commit()
+                            user_model = User(conn)
+                            internal_user_id = user_model.get_user_internal_id(user_id)
+                            
+                            if internal_user_id:
+                                conn.execute(
+                                    "INSERT INTO detections (user_id, text, pattern, patterns, confidence, audio_level, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                    (internal_user_id, recognized_text, result["pattern"], ",".join(result["patterns"]), 
+                                     float(result["confidence"]), float(chunk_energy), datetime.now().isoformat())
+                                )
+                                conn.commit()
                             conn.close()
                             
                             print(f"🔴 욕설 감지! 사용자: {user_id}, 텍스트: '{recognized_text}'")
@@ -223,18 +227,24 @@ async def get_stats(user_id: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다")
     
     conn = db.get_connection()
+    user_model = User(conn)
+    internal_user_id = user_model.get_user_internal_id(user_id)
     
-    # 오늘 통계
+    if not internal_user_id:
+        conn.close()
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다")
+    
+    # 오늘 통계 (외래키 사용)
     cursor = conn.execute(
         "SELECT COUNT(*), AVG(confidence) FROM detections WHERE user_id = ? AND date(timestamp) = date('now')",
-        (user_id,)
+        (internal_user_id,)
     )
     today_count, today_avg = cursor.fetchone()
     
-    # 일주일 통계
+    # 일주일 통계 (외래키 사용)
     cursor = conn.execute(
         "SELECT COUNT(*), AVG(confidence) FROM detections WHERE user_id = ? AND date(timestamp) >= date('now', '-7 days')",
-        (user_id,)
+        (internal_user_id,)
     )
     week_count, week_avg = cursor.fetchone()
     
@@ -244,6 +254,47 @@ async def get_stats(user_id: Optional[str] = Header(None)):
         "today": {"count": today_count or 0, "avg_confidence": round(today_avg or 0, 2)},
         "week": {"count": week_count or 0, "avg_confidence": round(week_avg or 0, 2)}
     }
+
+# 사용자별 욕설 기록 조회
+@app.get("/detections")
+async def get_detections(user_id: Optional[str] = Header(None), limit: int = 10):
+    if not user_id or not verify_user(user_id):
+        raise HTTPException(status_code=401, detail="인증되지 않은 사용자입니다")
+    
+    conn = db.get_connection()
+    user_model = User(conn)
+    internal_user_id = user_model.get_user_internal_id(user_id)
+    
+    if not internal_user_id:
+        conn.close()
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다")
+    
+    # 최근 욕설 감지 기록 조회 (JOIN으로 사용자 정보도 함께)
+    cursor = conn.execute("""
+        SELECT d.text, d.pattern, d.patterns, d.confidence, d.audio_level, d.timestamp, u.username
+        FROM detections d
+        JOIN users u ON d.user_id = u.id
+        WHERE d.user_id = ?
+        ORDER BY d.timestamp DESC
+        LIMIT ?
+    """, (internal_user_id, limit))
+    
+    results = cursor.fetchall()
+    conn.close()
+    
+    detections = []
+    for row in results:
+        detections.append({
+            "text": row[0],
+            "pattern": row[1],
+            "patterns": row[2].split(",") if row[2] else [],
+            "confidence": row[3],
+            "audio_level": row[4],
+            "timestamp": row[5],
+            "username": row[6]
+        })
+    
+    return {"detections": detections, "count": len(detections)}
 
 if __name__ == "__main__":
     import uvicorn
