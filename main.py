@@ -171,7 +171,8 @@ class SensitivityRequest(BaseModel):
 
 class GroupCreate(BaseModel):
     name: str
-    bet_deadline: Optional[str] = None
+    bet_deadline_date: Optional[str] = None  # YYYY-MM-DD 형식
+    bet_deadline_time: Optional[str] = None  # HH:MM 형식
 
 class GroupJoin(BaseModel):
     invite_code: str
@@ -370,10 +371,35 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         while True:
-            audio_data = await websocket.receive_bytes()
+            # 메시지 타입 확인
+            message = await websocket.receive()
             
-            # 바이트를 NumPy 배열로 변환
-            audio_chunk = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+            # 연결 종료 메시지 처리
+            if message["type"] == "websocket.disconnect":
+                break
+            
+            # 텍스트 메시지 처리 (ping, 상태 확인 등)
+            if message["type"] == "websocket.receive" and "text" in message:
+                text_data = message["text"]
+                if text_data == "ping":
+                    await websocket.send_json({"type": "pong", "message": "연결 활성"})
+                    continue
+                elif text_data == "close":
+                    break
+                else:
+                    await websocket.send_json({"type": "error", "message": "오디오 데이터가 필요합니다"})
+                    continue
+            
+            # 바이너리 데이터 처리 (오디오)
+            if message["type"] == "websocket.receive" and "bytes" in message:
+                audio_data = message["bytes"]
+                
+                # 바이트를 NumPy 배열로 변환
+                audio_chunk = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+            else:
+                # 예상하지 못한 메시지 타입
+                await websocket.send_json({"type": "error", "message": "지원하지 않는 메시지 타입입니다"})
+                continue
             
             # 버퍼에 추가
             audio_buffer.extend(audio_chunk)
@@ -457,7 +483,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json(safe_json_convert(response_data))
                     
     except WebSocketDisconnect:
-        print(f"🔴 사용자 {user_id} 연결 끊김")
+        print(f"🔴 사용자 {user_id} 연결 끊김 (클라이언트가 연결 종료)")
+    except Exception as e:
+        print(f"❌ WebSocket 에러 - 사용자 {user_id}: {str(e)}")
+        try:
+            await websocket.send_json({"type": "error", "message": f"서버 에러: {str(e)}"})
+        except:
+            pass
 
 # 감지 레벨 설정
 @app.post("/sensitivity", 
@@ -916,8 +948,13 @@ async def get_word_stats(user_id: Optional[str] = Header(None)):
           **기능:**
           - 6자리 고유 초대 코드 자동 생성
           - 최대 5명까지 참여 가능
-          - 내기 마감일 설정 가능 (선택사항)
+          - 내기 마감일 설정 가능 (날짜 + 시간 별도 입력)
           - 그룹 생성자가 자동으로 관리자가 됨
+          
+          **마감일 설정:**
+          - bet_deadline_date: YYYY-MM-DD 형식 (예: "2024-12-31")
+          - bet_deadline_time: HH:MM 형식 (예: "23:59")
+          - 시간 생략 시 자동으로 23:59:59로 설정
           
           **초대 코드로 친구들을 초대하세요!**
           """)
@@ -935,7 +972,17 @@ async def create_group(group_data: GroupCreate, user_id: Optional[str] = Header(
         conn.close()
         raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다")
     
-    result = group_model.create_group(group_data.name, internal_user_id, group_data.bet_deadline)
+    # 날짜와 시간을 합쳐서 bet_deadline 생성
+    bet_deadline = None
+    if group_data.bet_deadline_date:
+        if group_data.bet_deadline_time:
+            # 날짜와 시간 모두 있으면 합치기
+            bet_deadline = f"{group_data.bet_deadline_date} {group_data.bet_deadline_time}:00"
+        else:
+            # 날짜만 있으면 23:59:59로 설정
+            bet_deadline = f"{group_data.bet_deadline_date} 23:59:59"
+    
+    result = group_model.create_group(group_data.name, internal_user_id, bet_deadline)
     conn.close()
     
     if result["success"]:

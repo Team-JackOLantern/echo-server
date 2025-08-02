@@ -31,3 +31,4 @@ INFO:     127.0.0.1:63322 - "GET /groups/my HTTP/1.1" 200 OK
 INFO:     127.0.0.1:63364 - "POST /groups/banned-words HTTP/1.1" 200 OK
 INFO:     127.0.0.1:63398 - "GET /groups/1/banned-words HTTP/1.1" 200 OK
 INFO:     127.0.0.1:63425 - "GET /groups/1/ranking?period=week HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53543 - "GET / HTTP/1.1" 200 OK
